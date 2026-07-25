@@ -44,7 +44,18 @@ jobs:
           echo "ANDROID_NDK_HOME=${{ steps.ndk.outputs.ndk-path }}" >> $GITHUB_ENV
           echo "NDK=${{ steps.ndk.outputs.ndk-path }}" >> $GITHUB_ENV
 
+      # Cache the built FFmpeg (contrib/build/output-<arch>) so JNI-only
+      # iterations skip the ~8 min FFmpeg cross-compile. Key changes whenever the
+      # FFmpeg build scripts change.
+      - name: Cache FFmpeg output
+        id: ffcache
+        uses: actions/cache@v4
+        with:
+          path: android/contrib/build/output-*
+          key: ffmpeg-16kb-r27c-${{ hashFiles('android/contrib/tools/do-compile-ffmpeg.sh', 'android/contrib/tools/do-detect-env.sh', 'android/contrib/compile-ffmpeg.sh') }}
+
       - name: Fetch FFmpeg sources
+        if: steps.ffcache.outputs.cache-hit != 'true'
         run: |
           # init-android.sh lives at the repo root and clones FFmpeg into
           # android/contrib/ffmpeg-<arch> for each ABI.
@@ -81,6 +92,7 @@ jobs:
           test -f /tmp/t2 && echo "SYMLINK OK" || echo "SYMLINK FAIL"
 
       - name: Compile FFmpeg (all ABIs)
+        if: steps.ffcache.outputs.cache-hit != 'true'
         run: |
           cd android/contrib
           ./compile-ffmpeg.sh clean
@@ -92,6 +104,21 @@ jobs:
             echo "::endgroup::"
             exit 1
           }
+
+      # The JNI Android.mk reads FFmpeg from contrib/build/ffmpeg-<arch>/output,
+      # but the modernized do-compile-ffmpeg.sh installs to contrib/build/output-<arch>.
+      # Bridge the two layouts with symlinks so PREBUILT_SHARED_LIBRARY resolves.
+      - name: Bridge FFmpeg output layout for ndk-build
+        run: |
+          cd android/contrib/build
+          for a in armv7a arm64 x86 x86_64; do
+            [ -d "output-$a" ] || { echo "missing output-$a"; exit 1; }
+            mkdir -p "ffmpeg-$a"
+            ln -sfn "$(realpath output-$a)" "ffmpeg-$a/output"
+            echo "ffmpeg-$a/output -> $(readlink ffmpeg-$a/output)"
+            ls "ffmpeg-$a/output/libijkffmpeg.so" "ffmpeg-$a/output/include" >/dev/null \
+              && echo "  ok: .so + include present" || { echo "  !! missing .so or include"; ls -la "ffmpeg-$a/output"; exit 1; }
+          done
 
       - name: Compile ijkplayer JNI (.so via ndk-build)
         run: |
