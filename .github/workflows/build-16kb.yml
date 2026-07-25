@@ -67,7 +67,14 @@ jobs:
         run: |
           cd android/contrib
           ./compile-ffmpeg.sh clean
-          ./compile-ffmpeg.sh all
+          ./compile-ffmpeg.sh all || {
+            echo "::group::FFmpeg config.log (link error detail)"
+            for l in $(find . -name config.log 2>/dev/null); do
+              echo "### $l"; tail -50 "$l"
+            done
+            echo "::endgroup::"
+            exit 1
+          }
 
       - name: Compile ijkplayer (all ABIs)
         run: |
