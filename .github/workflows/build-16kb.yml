@@ -90,10 +90,17 @@ jobs:
             exit 1
           }
 
-      - name: Compile ijkplayer (all ABIs)
+      - name: Compile ijkplayer JNI (.so via ndk-build)
         run: |
           cd android
-          ./compile-ijk.sh all
+          # 'all' includes armv5 (unsupported on modern NDK) — build the 4 real ABIs.
+          for a in armv7a arm64 x86 x86_64; do
+            echo "::group::ndk-build $a"
+            ./compile-ijk.sh "$a"
+            echo "::endgroup::"
+          done
+          echo "=== produced .so ==="
+          find . -name '*.so' | sort
 
       # Every LOAD segment must show Align 0x4000 (16384), not 0x1000 (4096).
       - name: Verify 16 KB alignment
@@ -113,7 +120,7 @@ jobs:
           name: ijkplayer-16kb
           if-no-files-found: warn
           path: |
-            android/**/libs/**/*.so
+            android/**/*.so
             android/**/*.aar
 
 # After this produces 16 KB .so, assemble fijkplayer-full.aar in the
