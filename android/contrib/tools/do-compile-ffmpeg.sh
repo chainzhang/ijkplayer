@@ -81,7 +81,7 @@ FF_GCC_64_VER=$IJK_GCC_64_VER
 #----- armv7a begin -----
 if [ "$FF_ARCH" = "armv7a" ]; then
     FF_TOOLCHAIN_ARCH=arm
-    FF_ANDROID_PLATFORM=16
+    FF_ANDROID_PLATFORM=21
     FF_BUILD_NAME=ffmpeg-armv7a
     FF_BUILD_NAME_OPENSSL=openssl-armv7a
     FF_BUILD_NAME_LIBSOXR=libsoxr-armv7a
@@ -102,7 +102,7 @@ if [ "$FF_ARCH" = "armv7a" ]; then
 
 elif [ "$FF_ARCH" = "armv5" ]; then
     FF_TOOLCHAIN_ARCH=arm
-    FF_ANDROID_PLATFORM=16
+    FF_ANDROID_PLATFORM=21
 
     FF_BUILD_NAME=ffmpeg-armv5
     FF_BUILD_NAME_OPENSSL=openssl-armv5
@@ -122,7 +122,7 @@ elif [ "$FF_ARCH" = "armv5" ]; then
 
 elif [ "$FF_ARCH" = "x86" ]; then
     FF_TOOLCHAIN_ARCH=x86
-    FF_ANDROID_PLATFORM=16
+    FF_ANDROID_PLATFORM=21
 
     FF_BUILD_NAME=ffmpeg-x86
     FF_BUILD_NAME_OPENSSL=openssl-x86
@@ -219,20 +219,39 @@ esac
 mkdir -p $FF_PREFIX
 
 
+# Modernized: use the NDK *unified* clang toolchain (standalone toolchains were
+# removed in NDK r19+). Instead of make_standalone_toolchain, create thin
+# symlinks under the paths the rest of this script expects
+# (${FF_CROSS_PREFIX}-clang / -clang++ / -ar / -nm / -ranlib / -strip / -ld and
+# a sysroot). Works with NDK r25/r27 and gives 16 KB-aligned .so.
 FF_TOOLCHAIN_TOUCH="$FF_TOOLCHAIN_PATH/touch"
 if [ ! -f "$FF_TOOLCHAIN_TOUCH" ]; then
-    echo "FF_MAKE_TOOLCHAIN_FLAGS:$FF_MAKE_TOOLCHAIN_FLAGS"
-    # $ANDROID_NDK/build/tools/make-standalone-toolchain.sh \
-    #     $FF_MAKE_TOOLCHAIN_FLAGS \
-    #     --platform=$FF_ANDROID_PLATFORM \
-    #     --toolchain=$FF_TOOLCHAIN_NAME
-    python $ANDROID_NDK/build/tools/make_standalone_toolchain.py \
-        --arch ${FF_TOOLCHAIN_ARCH} \
-        --api ${FF_ANDROID_PLATFORM} \
-        --stl libc++ \
-        --install-dir ${FF_TOOLCHAIN_PATH}
-    touch $FF_TOOLCHAIN_TOUCH;
+    case "$UNAME_S" in
+        Darwin) FF_NDK_HOST=darwin-x86_64 ;;
+        *)      FF_NDK_HOST=linux-x86_64 ;;
+    esac
+    FF_UNIFIED="$ANDROID_NDK/toolchains/llvm/prebuilt/$FF_NDK_HOST"
+    case "$FF_ARCH" in
+        armv7a) FF_CLANG_TRIPLE=armv7a-linux-androideabi ;;
+        arm64)  FF_CLANG_TRIPLE=aarch64-linux-android ;;
+        x86)    FF_CLANG_TRIPLE=i686-linux-android ;;
+        x86_64) FF_CLANG_TRIPLE=x86_64-linux-android ;;
+        *) echo "unsupported arch $FF_ARCH"; exit 1 ;;
+    esac
+    mkdir -p "$FF_TOOLCHAIN_PATH/bin"
+    ln -sf "$FF_UNIFIED/bin/${FF_CLANG_TRIPLE}${FF_ANDROID_PLATFORM}-clang"   "$FF_TOOLCHAIN_PATH/bin/${FF_CROSS_PREFIX}-clang"
+    ln -sf "$FF_UNIFIED/bin/${FF_CLANG_TRIPLE}${FF_ANDROID_PLATFORM}-clang++" "$FF_TOOLCHAIN_PATH/bin/${FF_CROSS_PREFIX}-clang++"
+    ln -sf "$FF_UNIFIED/bin/llvm-ar"     "$FF_TOOLCHAIN_PATH/bin/${FF_CROSS_PREFIX}-ar"
+    ln -sf "$FF_UNIFIED/bin/llvm-nm"     "$FF_TOOLCHAIN_PATH/bin/${FF_CROSS_PREFIX}-nm"
+    ln -sf "$FF_UNIFIED/bin/llvm-ranlib" "$FF_TOOLCHAIN_PATH/bin/${FF_CROSS_PREFIX}-ranlib"
+    ln -sf "$FF_UNIFIED/bin/llvm-strip"  "$FF_TOOLCHAIN_PATH/bin/${FF_CROSS_PREFIX}-strip"
+    ln -sf "$FF_UNIFIED/bin/ld.lld"      "$FF_TOOLCHAIN_PATH/bin/${FF_CROSS_PREFIX}-ld"
+    ln -sf "$FF_UNIFIED/sysroot"         "$FF_TOOLCHAIN_PATH/sysroot"
+    touch "$FF_TOOLCHAIN_TOUCH";
 fi
+# 16 KB page-size alignment (Android 15). lld supports these on any modern NDK.
+# Applied every run (not only first) so re-links pick it up.
+FF_EXTRA_LDFLAGS="$FF_EXTRA_LDFLAGS -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384"
 
 
 #--------------------
