@@ -46,6 +46,12 @@ endif ()
 add_compile_options("-Wno-deprecated-declarations")
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
+# Android 15 (API 35) 16 KB page-size requirement: force every LOAD segment to
+# align on 16 KB (0x4000). arm64/x86_64 already default to this on NDK r27, but
+# armv7a/x86 need the explicit flag. Applies to libijkplayer.so + all ijkmedia
+# sub-libraries built here. libijkffmpeg.so is already 16 KB from the FFmpeg build.
+set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384")
+
 set(ANDROID_CONTRIB_PATH ${FIJKROOT_PATH}/android/contrib/build)
 message(STATUS "ANDROID_CONTRIB_PATH:${ANDROID_CONTRIB_PATH}")
 
