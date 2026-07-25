@@ -54,14 +54,14 @@ set(ly_source_files
 )
 
 if(ANDROID)
-  if(${ANDROID_ABI} STREQUAL "armeabi-va7")
-    add_definitions(-DLIBYUV_NEON)
-    list(APPEND ly_source_files
-      source/compare_neon.cc.neon
-      source/rotate_neon.cc.neon
-      source/row_neon.cc.neon
-      source/scale_neon.cc.neon
-    )
+  if(${ANDROID_ABI} STREQUAL "armeabi-v7a")
+    # The armv7a NEON impls are *.cc.neon (ndk-build LOCAL_ARM_NEON convention),
+    # which CMake cannot compile, and the original guard had a typo
+    # ("armeabi-va7") so this branch never ran. clang still auto-defines
+    # __ARM_NEON__, making libyuv's dispatch reference *_NEON symbols that were
+    # never built -> link errors. Disable NEON on armv7a: libyuv uses its C
+    # fallback (armv7a is legacy; arm64 keeps full NEON below).
+    add_definitions(-DLIBYUV_DISABLE_NEON)
   elseif(${ANDROID_ABI} STREQUAL "arm64-v8a")
     add_definitions(-DLIBYUV_NEON)
     list(APPEND ly_source_files

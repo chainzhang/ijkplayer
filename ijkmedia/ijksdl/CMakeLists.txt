@@ -177,7 +177,7 @@ endif()
 #include ffmpeg header files
 target_include_directories(${IJKSDL_LIB_NAME} PRIVATE ${IJK_FFMPAG_BUILD_DIR}/include)
 
-target_compile_options(${IJKSDL_LIB_NAME} PUBLIC "-Werror")
+target_compile_options(${IJKSDL_LIB_NAME} PUBLIC "-Werror" "-Wno-error")
 if (ANDROID)
     # build cpufeatures as a static lib
     # add_library(cpufeatures STATIC
