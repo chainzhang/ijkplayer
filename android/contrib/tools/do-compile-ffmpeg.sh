@@ -239,8 +239,18 @@ if [ ! -f "$FF_TOOLCHAIN_TOUCH" ]; then
         *) echo "unsupported arch $FF_ARCH"; exit 1 ;;
     esac
     mkdir -p "$FF_TOOLCHAIN_PATH/bin"
-    ln -sf "$FF_UNIFIED/bin/${FF_CLANG_TRIPLE}${FF_ANDROID_PLATFORM}-clang"   "$FF_TOOLCHAIN_PATH/bin/${FF_CROSS_PREFIX}-clang"
-    ln -sf "$FF_UNIFIED/bin/${FF_CLANG_TRIPLE}${FF_ANDROID_PLATFORM}-clang++" "$FF_TOOLCHAIN_PATH/bin/${FF_CROSS_PREFIX}-clang++"
+    # clang infers target+API from argv[0]; a symlink keeps the (API-less) link
+    # name so it can't find the sysroot. Use exec wrappers so argv[0] is the real
+    # API-named binary (${triple}${api}-clang).
+    cat > "$FF_TOOLCHAIN_PATH/bin/${FF_CROSS_PREFIX}-clang" <<EOF
+#!/bin/sh
+exec "$FF_UNIFIED/bin/${FF_CLANG_TRIPLE}${FF_ANDROID_PLATFORM}-clang" "\$@"
+EOF
+    cat > "$FF_TOOLCHAIN_PATH/bin/${FF_CROSS_PREFIX}-clang++" <<EOF
+#!/bin/sh
+exec "$FF_UNIFIED/bin/${FF_CLANG_TRIPLE}${FF_ANDROID_PLATFORM}-clang++" "\$@"
+EOF
+    chmod +x "$FF_TOOLCHAIN_PATH/bin/${FF_CROSS_PREFIX}-clang" "$FF_TOOLCHAIN_PATH/bin/${FF_CROSS_PREFIX}-clang++"
     ln -sf "$FF_UNIFIED/bin/llvm-ar"     "$FF_TOOLCHAIN_PATH/bin/${FF_CROSS_PREFIX}-ar"
     ln -sf "$FF_UNIFIED/bin/llvm-nm"     "$FF_TOOLCHAIN_PATH/bin/${FF_CROSS_PREFIX}-nm"
     ln -sf "$FF_UNIFIED/bin/llvm-ranlib" "$FF_TOOLCHAIN_PATH/bin/${FF_CROSS_PREFIX}-ranlib"
