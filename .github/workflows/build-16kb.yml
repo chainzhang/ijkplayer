@@ -37,7 +37,8 @@ jobs:
 
       - name: Fetch FFmpeg sources
         run: |
-          cd config
+          # init-android.sh lives at the repo root and clones FFmpeg into
+          # android/contrib/ffmpeg-<arch> for each ABI.
           ./init-android.sh
 
       # Belt-and-suspenders: force 16 KB alignment on every ABI's link step.
