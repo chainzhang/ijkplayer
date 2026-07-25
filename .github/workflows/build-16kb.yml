@@ -28,14 +28,14 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      # ijkplayer's FFmpeg build needs make-standalone-toolchain.sh, removed in
-      # NDK r19+. So use the ijkplayer-recommended r16b (still has it) and force
-      # 16 KB alignment via -Wl,-z,max-page-size=16384 (works on any NDK linker).
-      - name: Set up NDK r16b
+      # Modern NDK: the fork's do-compile-ffmpeg.sh now uses the unified clang
+      # toolchain (no standalone toolchain), so r27c works and gives 16 KB
+      # alignment (arm64/x86_64 by default + explicit flag in the script).
+      - name: Set up NDK r27c
         id: ndk
         uses: nttld/setup-ndk@v1
         with:
-          ndk-version: r16b
+          ndk-version: r27c
           add-to-path: true
 
       - name: Export NDK env for ijkplayer scripts
