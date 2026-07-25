@@ -78,8 +78,10 @@ case "$IJK_NDK_REL" in
                 fi
             ;;
             *)
-                echo "You need the NDKr10e or later"
-                exit 1
+                # Modern NDK (r17+ unified clang toolchain). Accepted — the
+                # do-compile-*.sh scripts now use the unified toolchain directly
+                # (no standalone toolchain / gcc-4.9 dirs).
+                echo "NDKr$IJK_NDK_REL detected (unified clang toolchain)"
             ;;
         esac
     ;;
