@@ -262,6 +262,13 @@ fi
 # 16 KB page-size alignment (Android 15). lld supports these on any modern NDK.
 # Applied every run (not only first) so re-links pick it up.
 FF_EXTRA_LDFLAGS="$FF_EXTRA_LDFLAGS -Wl,-z,max-page-size=16384"
+# This ijkplayer-era FFmpeg predates clang 17, which promoted several
+# diagnostics to hard errors. Downgrade them back to warnings so it compiles.
+FF_EXTRA_CFLAGS="$FF_EXTRA_CFLAGS \
+    -Wno-error=incompatible-function-pointer-types \
+    -Wno-error=implicit-function-declaration \
+    -Wno-error=int-conversion \
+    -Wno-error=implicit-int"
 
 
 #--------------------
