@@ -53,13 +53,11 @@ jobs:
       # Belt-and-suspenders: force 16 KB alignment on every ABI's link step.
       - name: Patch link flags for 16 KB
         run: |
+          # NOTE: only patch the ijk JNI link (APP_LDFLAGS) here. Injecting the
+          # flag into FFmpeg's --extra-ldflags breaks configure's link sanity
+          # test on the r16b toolchain. FFmpeg static libs are re-linked into
+          # libijkplayer.so anyway, so APP_LDFLAGS covers the final .so.
           FLAGS='-Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384'
-          # FFmpeg module link step
-          for f in $(find android/contrib -name 'do-compile-ffmpeg.sh'); do
-            grep -q 'max-page-size=16384' "$f" || \
-              sed -i "s#--extra-ldflags=\"#--extra-ldflags=\"$FLAGS #" "$f" || true
-          done
-          # ijkplayer JNI ndk-build
           for mk in $(find android/ijkplayer -name 'Application.mk'); do
             grep -q 'max-page-size=16384' "$mk" || \
               printf "\nAPP_LDFLAGS += %s\n" "$FLAGS" >> "$mk"
