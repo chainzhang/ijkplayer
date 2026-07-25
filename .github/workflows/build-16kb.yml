@@ -50,17 +50,20 @@ jobs:
           # android/contrib/ffmpeg-<arch> for each ABI.
           ./init-android.sh
 
-      # Belt-and-suspenders: force 16 KB alignment on every ABI's link step.
-      - name: Patch link flags for 16 KB
+      # Patch the JNI ndk-build config for modern NDK (r27) + 16 KB alignment.
+      - name: Patch ndk-build config (STL + 16 KB link flags)
         run: |
-          # NOTE: only patch the ijk JNI link (APP_LDFLAGS) here. Injecting the
-          # flag into FFmpeg's --extra-ldflags breaks configure's link sanity
-          # test on the r16b toolchain. FFmpeg static libs are re-linked into
-          # libijkplayer.so anyway, so APP_LDFLAGS covers the final .so.
           FLAGS='-Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384'
           for mk in $(find android/ijkplayer -name 'Application.mk'); do
+            echo "patching $mk"
+            # Removed STLs in modern NDK → the only supported static STL is c++_static.
+            sed -i -E 's/APP_STL\s*:=\s*(stlport_static|gnustl_static|gnustl_shared|stlport_shared)/APP_STL := c++_static/' "$mk"
+            # android-9 / low APP_PLATFORM: r27 min is 21.
+            sed -i -E 's/APP_PLATFORM\s*:=\s*android-[0-9]+/APP_PLATFORM := android-21/' "$mk"
+            # 16 KB alignment on the final .so link.
             grep -q 'max-page-size=16384' "$mk" || \
               printf "\nAPP_LDFLAGS += %s\n" "$FLAGS" >> "$mk"
+            echo "--- $mk ---"; grep -E 'APP_STL|APP_PLATFORM|APP_ABI|APP_LDFLAGS' "$mk"
           done
 
       - name: Debug — test unified clang link
@@ -101,6 +104,17 @@ jobs:
           done
           echo "=== produced .so ==="
           find . -name '*.so' | sort
+          # compile-ijk.sh's `cd -` masks ndk-build failures (exits 0), so assert
+          # the JNI libs actually exist for every ABI we asked for.
+          missing=0
+          for a in armeabi-v7a arm64-v8a x86 x86_64; do
+            for lib in libijkplayer.so libijksdl.so; do
+              if ! find ijkplayer -path "*/libs/$a/$lib" | grep -q .; then
+                echo "::error::missing $a/$lib"; missing=1
+              fi
+            done
+          done
+          [ "$missing" -eq 0 ] || { echo "JNI build did not produce all libs"; exit 1; }
 
       # Every LOAD segment must show Align 0x4000 (16384), not 0x1000 (4096).
       - name: Verify 16 KB alignment
