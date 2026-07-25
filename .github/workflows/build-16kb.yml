@@ -63,6 +63,20 @@ jobs:
               printf "\nAPP_LDFLAGS += %s\n" "$FLAGS" >> "$mk"
           done
 
+      - name: Debug — test unified clang link
+        run: |
+          TC="$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64"
+          echo "wrapper:"; ls -la "$TC/bin/aarch64-linux-android21-clang" || echo "MISSING"
+          echo 'int main(){return 0;}' > /tmp/t.c
+          echo "--- direct ---"
+          "$TC/bin/aarch64-linux-android21-clang" -Wl,-z,max-page-size=16384 -o /tmp/t /tmp/t.c \
+            && echo "DIRECT OK" || echo "DIRECT FAIL"
+          echo "--- via symlink + ijk flags ---"
+          ln -sf "$TC/bin/aarch64-linux-android21-clang" /tmp/aarch64-linux-android-clang
+          /tmp/aarch64-linux-android-clang -O3 -std=c99 -fPIE -fPIC -ffast-math \
+            -Wa,--noexecstack -Wl,-z,max-page-size=16384 -o /tmp/t2 /tmp/t.c 2>&1 | tail -25
+          test -f /tmp/t2 && echo "SYMLINK OK" || echo "SYMLINK FAIL"
+
       - name: Compile FFmpeg (all ABIs)
         run: |
           cd android/contrib
