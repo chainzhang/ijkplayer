@@ -251,7 +251,7 @@ if [ ! -f "$FF_TOOLCHAIN_TOUCH" ]; then
 fi
 # 16 KB page-size alignment (Android 15). lld supports these on any modern NDK.
 # Applied every run (not only first) so re-links pick it up.
-FF_EXTRA_LDFLAGS="$FF_EXTRA_LDFLAGS -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384"
+FF_EXTRA_LDFLAGS="$FF_EXTRA_LDFLAGS -Wl,-z,max-page-size=16384"
 
 
 #--------------------
