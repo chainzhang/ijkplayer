@@ -91,7 +91,7 @@ if [ "$FF_ARCH" = "armv7a" ]; then
     FF_CROSS_PREFIX=arm-linux-androideabi
     FF_TOOLCHAIN_NAME=${FF_CROSS_PREFIX}-${FF_GCC_VER}
 
-    FF_CFG_FLAGS="$FF_CFG_FLAGS --arch=arm --cpu=cortex-a8"
+    FF_CFG_FLAGS="$FF_CFG_FLAGS --arch=arm --cpu=cortex-a8 --disable-x86asm"
     FF_CFG_FLAGS="$FF_CFG_FLAGS --enable-neon"
     FF_CFG_FLAGS="$FF_CFG_FLAGS --enable-thumb"
 
@@ -113,7 +113,7 @@ elif [ "$FF_ARCH" = "armv5" ]; then
     FF_CROSS_PREFIX=arm-linux-androideabi
     FF_TOOLCHAIN_NAME=${FF_CROSS_PREFIX}-${FF_GCC_VER}
 
-    FF_CFG_FLAGS="$FF_CFG_FLAGS --arch=arm"
+    FF_CFG_FLAGS="$FF_CFG_FLAGS --arch=arm --disable-x86asm"
 
     FF_EXTRA_CFLAGS="$FF_EXTRA_CFLAGS -march=armv5te -mtune=arm9tdmi -msoft-float"
     FF_EXTRA_LDFLAGS="$FF_EXTRA_LDFLAGS"
@@ -173,7 +173,7 @@ elif [ "$FF_ARCH" = "arm64" ]; then
     FF_CROSS_PREFIX=aarch64-linux-android
     FF_TOOLCHAIN_NAME=${FF_CROSS_PREFIX}-${FF_GCC_64_VER}
 
-    FF_CFG_FLAGS="$FF_CFG_FLAGS --arch=aarch64 --enable-yasm"
+    FF_CFG_FLAGS="$FF_CFG_FLAGS --arch=aarch64 --disable-x86asm"
 
     FF_EXTRA_CFLAGS="$FF_EXTRA_CFLAGS"
     FF_EXTRA_LDFLAGS="$FF_EXTRA_LDFLAGS"
@@ -420,22 +420,19 @@ echo "[*] link ffmpeg"
 echo "--------------------"
 echo $FF_EXTRA_LDFLAGS
 
-FF_C_OBJ_FILES=
-FF_ASM_OBJ_FILES=
+# Link the FFmpeg static libraries with --whole-archive so every object is
+# pulled in regardless of source-tree layout. FFmpeg 7.x reorganized codecs into
+# nested subdirs (libavcodec/hevc, aac, h26x, aarch64/h26x, ...) that the old
+# flat "$MODULE_DIR/*.o" + one-level asm glob silently missed -> undefined asm
+# symbols at link time. The per-lib .a archives always contain everything.
+FF_STATIC_LIBS=
 for MODULE_DIR in $FF_MODULE_DIRS
 do
-    C_OBJ_FILES="$MODULE_DIR/*.o"
-    if ls $C_OBJ_FILES 1> /dev/null 2>&1; then
-        echo "link $MODULE_DIR/*.o"
-        FF_C_OBJ_FILES="$FF_C_OBJ_FILES $C_OBJ_FILES"
-    fi
-
-    for ASM_SUB_DIR in $FF_ASSEMBLER_SUB_DIRS
+    for A in $MODULE_DIR/lib*.a
     do
-        ASM_OBJ_FILES="$MODULE_DIR/$ASM_SUB_DIR/*.o"
-        if ls $ASM_OBJ_FILES 1> /dev/null 2>&1; then
-            echo "link $MODULE_DIR/$ASM_SUB_DIR/*.o"
-            FF_ASM_OBJ_FILES="$FF_ASM_OBJ_FILES $ASM_OBJ_FILES"
+        if [ -f "$A" ]; then
+            echo "link (whole-archive) $A"
+            FF_STATIC_LIBS="$FF_STATIC_LIBS $A"
         fi
     done
 done
@@ -444,8 +441,9 @@ echo "link FF_DEP_LIBS:$FF_DEP_LIBS"
 echo "link FF_EXTRA_LDFLAGS:$FF_EXTRA_LDFLAGS"
 $CC -lm -lz -shared -Wl,-Bsymbolic --sysroot=$FF_SYSROOT -Wl,--no-undefined -Wl,-z,noexecstack $FF_EXTRA_LDFLAGS \
     -Wl,-soname,libijkffmpeg.so \
-    $FF_C_OBJ_FILES \
-    $FF_ASM_OBJ_FILES \
+    -Wl,--whole-archive \
+    $FF_STATIC_LIBS \
+    -Wl,--no-whole-archive \
     $FF_DEP_LIBS \
     -o $FF_PREFIX/libijkffmpeg.so
 
