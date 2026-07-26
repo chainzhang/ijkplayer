@@ -47,6 +47,13 @@ fi
 FF_BUILD_ROOT=`pwd`
 FF_TAGET_OS="darwin"
 
+# Normalize arch: FFmpeg's --arch wants "aarch64" for arm64, and clang's -arch
+# wants "arm64". arm64-sim is our synthetic name for the arm64 iOS Simulator.
+case "$FF_ARCH" in
+    arm64|arm64-sim) FF_FFARCH="aarch64"; FF_CLANG_ARCH="arm64" ;;
+    *)               FF_FFARCH="$FF_ARCH"; FF_CLANG_ARCH="$FF_ARCH" ;;
+esac
+
 
 # ffmpeg build params
 export COMMON_FF_CFG_FLAGS=
@@ -69,7 +76,7 @@ FFMPEG_CFG_FLAGS="$FFMPEG_CFG_FLAGS --enable-cross-compile"
 FFMPEG_CFG_FLAGS="$FFMPEG_CFG_FLAGS --disable-stripping"
 
 ##
-FFMPEG_CFG_FLAGS="$FFMPEG_CFG_FLAGS --arch=$FF_ARCH"
+FFMPEG_CFG_FLAGS="$FFMPEG_CFG_FLAGS --arch=$FF_FFARCH"
 FFMPEG_CFG_FLAGS="$FFMPEG_CFG_FLAGS --target-os=$FF_TAGET_OS"
 FFMPEG_CFG_FLAGS="$FFMPEG_CFG_FLAGS --enable-static"
 FFMPEG_CFG_FLAGS="$FFMPEG_CFG_FLAGS --disable-shared"
@@ -122,40 +129,27 @@ FF_DEP_OPENSSL_INC=
 FF_DEP_OPENSSL_LIB=
 FF_XCODE_BITCODE=
 
-if [ "$FF_ARCH" = "i386" ]; then
-    FF_BUILD_NAME="ffmpeg-i386"
-    FF_BUILD_NAME_OPENSSL=openssl-i386
-    FF_XCRUN_PLATFORM="iPhoneSimulator"
-    FF_XCRUN_OSVERSION="-mios-simulator-version-min=6.0"
-    FFMPEG_CFG_FLAGS="$FFMPEG_CFG_FLAGS $FFMPEG_CFG_FLAGS_SIMULATOR"
-elif [ "$FF_ARCH" = "x86_64" ]; then
+# Modernized for FFmpeg 7 + Apple Silicon: only arm64 (device), arm64-sim
+# (Apple Silicon Simulator) and x86_64 (Intel Simulator). Bitcode is removed
+# (Xcode 14+), and arm64 assembles directly with clang (no gas-preprocessor).
+if [ "$FF_ARCH" = "x86_64" ]; then
     FF_BUILD_NAME="ffmpeg-x86_64"
     FF_BUILD_NAME_OPENSSL=openssl-x86_64
     FF_XCRUN_PLATFORM="iPhoneSimulator"
-    FF_XCRUN_OSVERSION="-mios-simulator-version-min=7.0"
+    FF_XCRUN_OSVERSION="-mios-simulator-version-min=12.0"
     FFMPEG_CFG_FLAGS="$FFMPEG_CFG_FLAGS $FFMPEG_CFG_FLAGS_SIMULATOR"
-elif [ "$FF_ARCH" = "armv7" ]; then
-    FF_BUILD_NAME="ffmpeg-armv7"
-    FF_BUILD_NAME_OPENSSL=openssl-armv7
-    FF_XCRUN_OSVERSION="-miphoneos-version-min=6.0"
-    FF_XCODE_BITCODE="-fembed-bitcode"
-    FFMPEG_CFG_FLAGS_ARM="$FFMPEG_CFG_FLAGS_ARM --disable-asm"
-    FFMPEG_CFG_FLAGS="$FFMPEG_CFG_FLAGS $FFMPEG_CFG_FLAGS_ARM"
-#    FFMPEG_CFG_CPU="--cpu=cortex-a8"
-elif [ "$FF_ARCH" = "armv7s" ]; then
-    FF_BUILD_NAME="ffmpeg-armv7s"
-    FF_BUILD_NAME_OPENSSL=openssl-armv7s
-    FFMPEG_CFG_CPU="--cpu=swift"
-    FF_XCRUN_OSVERSION="-miphoneos-version-min=6.0"
-    FF_XCODE_BITCODE="-fembed-bitcode"
-    FFMPEG_CFG_FLAGS="$FFMPEG_CFG_FLAGS $FFMPEG_CFG_FLAGS_ARM"
 elif [ "$FF_ARCH" = "arm64" ]; then
     FF_BUILD_NAME="ffmpeg-arm64"
     FF_BUILD_NAME_OPENSSL=openssl-arm64
-    FF_XCRUN_OSVERSION="-miphoneos-version-min=7.0"
-    FF_XCODE_BITCODE="-fembed-bitcode"
+    FF_XCRUN_PLATFORM="iPhoneOS"
+    FF_XCRUN_OSVERSION="-miphoneos-version-min=12.0"
     FFMPEG_CFG_FLAGS="$FFMPEG_CFG_FLAGS $FFMPEG_CFG_FLAGS_ARM"
-    FF_GASPP_EXPORT="GASPP_FIX_XCODE5=1"
+elif [ "$FF_ARCH" = "arm64-sim" ]; then
+    FF_BUILD_NAME="ffmpeg-arm64-sim"
+    FF_BUILD_NAME_OPENSSL=openssl-arm64-sim
+    FF_XCRUN_PLATFORM="iPhoneSimulator"
+    FF_XCRUN_OSVERSION="-mios-simulator-version-min=12.0"
+    FFMPEG_CFG_FLAGS="$FFMPEG_CFG_FLAGS $FFMPEG_CFG_FLAGS_ARM"
 else
     echo "unknown architecture $FF_ARCH";
     exit 1
@@ -187,17 +181,14 @@ echo "--------------------"
 FF_XCRUN_SDK=`echo $FF_XCRUN_PLATFORM | tr '[:upper:]' '[:lower:]'`
 FF_XCRUN_CC="xcrun -sdk $FF_XCRUN_SDK clang"
 
-if [ "$FF_ARCH" = "arm64" ]
-then
-    FF_AS="gas-preprocessor.pl -arch aarch64 -- $FF_XCRUN_CC"
-else
-    FF_AS="gas-preprocessor.pl -- $FF_XCRUN_CC"
-fi
+# FFmpeg 7 aarch64 assembles directly with clang; x86_64 sim disables asm.
+# gas-preprocessor is no longer needed for any target we build.
+FF_AS="$FF_XCRUN_CC"
 
 FFMPEG_CFG_FLAGS="$FFMPEG_CFG_FLAGS $FFMPEG_CFG_CPU"
 
 FFMPEG_CFLAGS=
-FFMPEG_CFLAGS="$FFMPEG_CFLAGS -arch $FF_ARCH"
+FFMPEG_CFLAGS="$FFMPEG_CFLAGS -arch $FF_CLANG_ARCH"
 FFMPEG_CFLAGS="$FFMPEG_CFLAGS $FF_XCRUN_OSVERSION"
 FFMPEG_CFLAGS="$FFMPEG_CFLAGS $FFMPEG_EXTRA_CFLAGS"
 FFMPEG_CFLAGS="$FFMPEG_CFLAGS $FF_XCODE_BITCODE"

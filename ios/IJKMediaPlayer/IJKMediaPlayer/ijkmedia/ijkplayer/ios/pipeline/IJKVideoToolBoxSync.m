@@ -683,8 +683,13 @@ static int decode_video(Ijk_VideoToolBox_Opaque* context, AVCodecContext *avctx,
                 return ret;
             }
 
-            ret = avcodec_decode_video2(new_avctx, frame, &got_picture, avpkt);
-            if (ret < 0) {
+            // FFmpeg 7: avcodec_decode_video2 removed -> send/receive. Decodes
+            // one packet to detect the stream's real dimensions.
+            ret = avcodec_send_packet(new_avctx, avpkt);
+            if (ret >= 0)
+                ret = avcodec_receive_frame(new_avctx, frame);
+            got_picture = (ret == 0);
+            if (ret < 0 && ret != AVERROR(EAGAIN) && ret != AVERROR_EOF) {
                 avcodec_free_context(&new_avctx);
                 return ret;
             } else {
@@ -871,8 +876,7 @@ int videotoolbox_sync_decode_frame(Ijk_VideoToolBox_Opaque* context)
                 }
             } while (ffp_is_flush_packet(&pkt) || d->queue->serial != d->pkt_serial);
 
-            av_packet_split_side_data(&pkt);
-
+            // FFmpeg 7: av_packet_split_side_data removed (side data already parsed).
             av_packet_unref(&d->pkt);
             d->pkt_temp = d->pkt = pkt;
             d->packet_pending = 1;
