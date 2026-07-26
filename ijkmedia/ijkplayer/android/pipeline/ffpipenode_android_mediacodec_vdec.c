@@ -35,6 +35,7 @@
 #include "hevc_nal.h"
 #include "mpeg4_esds.h"
 #include "ffpipeline_android.h"
+#include "libavcodec/bsf.h"
 
 #define AMC_USE_AVBITSTREAM_FILTER 0
 #ifndef AMCTRACE
@@ -79,7 +80,7 @@ typedef struct IJKFF_Pipenode_Opaque {
 
     AVCodecContext           *avctx; // not own
     AVCodecParameters        *codecpar;
-    AVBitStreamFilterContext *bsfc;  // own
+    AVBSFContext             *bsfc;  // own
 
 #if AMC_USE_AVBITSTREAM_FILTER
     uint8_t                  *orig_extradata;
@@ -183,22 +184,32 @@ static int recreate_format_l(JNIEnv *env, IJKFF_Pipenode *node)
             || (opaque->codecpar->codec_id == AV_CODEC_ID_HEVC && opaque->codecpar->extradata_size > 3
                 && (opaque->codecpar->extradata[0] == 1 || opaque->codecpar->extradata[1] == 1))) {
 #if AMC_USE_AVBITSTREAM_FILTER
-            if (opaque->codecpar->codec_id == AV_CODEC_ID_H264) {
-                opaque->bsfc = av_bitstream_filter_init("h264_mp4toannexb");
-                if (!opaque->bsfc) {
-                    ALOGE("Cannot open the h264_mp4toannexb BSF!\n");
-                    goto fail;
-                }
-            } else {
-                opaque->bsfc = av_bitstream_filter_init("hevc_mp4toannexb");
-                if (!opaque->bsfc) {
-                    ALOGE("Cannot open the hevc_mp4toannexb BSF!\n");
-                    goto fail;
-                }
+            const char *bsf_name = (opaque->codecpar->codec_id == AV_CODEC_ID_H264)
+                                       ? "h264_mp4toannexb"
+                                       : "hevc_mp4toannexb";
+            const AVBitStreamFilter *bsf = av_bsf_get_by_name(bsf_name);
+            if (!bsf) {
+                ALOGE("Cannot find the %s BSF!\n", bsf_name);
+                goto fail;
+            }
+            if (av_bsf_alloc(bsf, &opaque->bsfc) < 0) {
+                ALOGE("Cannot alloc the %s BSF!\n", bsf_name);
+                goto fail;
+            }
+            if (avcodec_parameters_copy(opaque->bsfc->par_in, opaque->codecpar) < 0) {
+                ALOGE("Cannot copy par_in to the %s BSF!\n", bsf_name);
+                av_bsf_free(&opaque->bsfc);
+                goto fail;
+            }
+            opaque->bsfc->time_base_in = opaque->avctx ? opaque->avctx->time_base : AV_TIME_BASE_Q;
+            if (av_bsf_init(opaque->bsfc) < 0) {
+                ALOGE("Cannot init the %s BSF!\n", bsf_name);
+                av_bsf_free(&opaque->bsfc);
+                goto fail;
             }
 
             opaque->orig_extradata_size = opaque->codecpar->extradata_size;
-            opaque->orig_extradata = (uint8_t*) av_mallocz(opaque->codecpar->extradata_size + FF_INPUT_BUFFER_PADDING_SIZE);
+            opaque->orig_extradata = (uint8_t*) av_mallocz(opaque->codecpar->extradata_size + AV_INPUT_BUFFER_PADDING_SIZE);
             if (!opaque->orig_extradata) {
                 goto fail;
             }
@@ -506,7 +517,7 @@ static int feed_input_buffer2(JNIEnv *env, IJKFF_Pipenode *node, int64_t timeUs,
                 d->next_pts_tb = d->start_pts_tb;
             }
         } while (ffp_is_flush_packet(&pkt) || d->queue->serial != d->pkt_serial);
-        av_packet_split_side_data(&pkt);
+        // av_packet_split_side_data removed in FFmpeg 5.0; side data is already parsed
         av_packet_unref(&d->pkt);
         d->pkt_temp = d->pkt = pkt;
         d->packet_pending = 1;
@@ -547,7 +558,13 @@ static int feed_input_buffer2(JNIEnv *env, IJKFF_Pipenode *node, int64_t timeUs,
                     return change_ret;
                 }
 
-                change_ret = avcodec_decode_video2(new_avctx, frame, &got_picture, avpkt);
+                change_ret = avcodec_send_packet(new_avctx, avpkt);
+                if (change_ret >= 0 || change_ret == AVERROR(EAGAIN)) {
+                    change_ret = avcodec_receive_frame(new_avctx, frame);
+                    got_picture = (change_ret == 0);
+                    if (change_ret == AVERROR(EAGAIN) || change_ret == AVERROR_EOF)
+                        change_ret = 0;
+                }
                 if (change_ret < 0) {
                     avcodec_free_context(&new_avctx);
                     return change_ret;
@@ -754,7 +771,7 @@ static int feed_input_buffer(JNIEnv *env, IJKFF_Pipenode *node, int64_t timeUs, 
                 d->next_pts_tb = d->start_pts_tb;
             }
         } while (ffp_is_flush_packet(&pkt) || d->queue->serial != d->pkt_serial);
-        av_packet_split_side_data(&pkt);
+        // av_packet_split_side_data removed in FFmpeg 5.0; side data is already parsed
         av_packet_unref(&d->pkt);
         d->pkt_temp = d->pkt = pkt;
         d->packet_pending = 1;
@@ -794,7 +811,13 @@ static int feed_input_buffer(JNIEnv *env, IJKFF_Pipenode *node, int64_t timeUs, 
                     return change_ret;
                 }
 
-                change_ret = avcodec_decode_video2(new_avctx, frame, &got_picture, avpkt);
+                change_ret = avcodec_send_packet(new_avctx, avpkt);
+                if (change_ret >= 0 || change_ret == AVERROR(EAGAIN)) {
+                    change_ret = avcodec_receive_frame(new_avctx, frame);
+                    got_picture = (change_ret == 0);
+                    if (change_ret == AVERROR(EAGAIN) || change_ret == AVERROR_EOF)
+                        change_ret = 0;
+                }
                 if (change_ret < 0) {
                     avcodec_free_context(&new_avctx);
                     return change_ret;
@@ -814,27 +837,69 @@ static int feed_input_buffer(JNIEnv *env, IJKFF_Pipenode *node, int64_t timeUs, 
         }
 
 #if AMC_USE_AVBITSTREAM_FILTER
-        // d->pkt_temp->data could be allocated by av_bitstream_filter_filter
+        // d->pkt_temp.data holds a buffer allocated by us from the previous filtered packet;
+        // free it before producing the next one.
         if (d->bfsc_ret > 0) {
             if (d->bfsc_data)
                 av_freep(&d->bfsc_data);
             d->bfsc_ret = 0;
         }
-        d->bfsc_ret =
-            av_bitstream_filter_filter(opaque->bsfc, opaque->avctx, NULL, &d->pkt_temp.data, &d->pkt_temp.size,
-                                       d->pkt.data, d->pkt.size, d->pkt.flags & AV_PKT_FLAG_KEY);
-        if (d->bfsc_ret > 0) {
-            d->bfsc_data = d->pkt_temp.data;
-        } else if (d->bfsc_ret < 0) {
-            ALOGE("%s: av_bitstream_filter_filter failed\n", __func__);
-            ret = -1;
-            goto fail;
+        {
+            AVPacket *filter_pkt = av_packet_alloc();
+            AVPacket *in_pkt     = av_packet_alloc();
+            if (!filter_pkt || !in_pkt) {
+                av_packet_free(&filter_pkt);
+                av_packet_free(&in_pkt);
+                ret = -1;
+                goto fail;
+            }
+            // av_bsf_send_packet takes ownership of the packet it is given, so feed it a
+            // reference of the source packet and keep d->pkt intact.
+            if (av_packet_ref(in_pkt, &d->pkt) < 0) {
+                av_packet_free(&filter_pkt);
+                av_packet_free(&in_pkt);
+                ret = -1;
+                goto fail;
+            }
+            d->bfsc_ret = av_bsf_send_packet(opaque->bsfc, in_pkt);
+            av_packet_free(&in_pkt);
+            if (d->bfsc_ret < 0) {
+                ALOGE("%s: av_bsf_send_packet failed\n", __func__);
+                av_packet_free(&filter_pkt);
+                ret = -1;
+                goto fail;
+            }
+            d->bfsc_ret = av_bsf_receive_packet(opaque->bsfc, filter_pkt);
+            if (d->bfsc_ret < 0 && d->bfsc_ret != AVERROR(EAGAIN) && d->bfsc_ret != AVERROR_EOF) {
+                ALOGE("%s: av_bsf_receive_packet failed\n", __func__);
+                av_packet_free(&filter_pkt);
+                ret = -1;
+                goto fail;
+            }
+            if (filter_pkt->size > 0) {
+                // Copy the filtered (annex-b) data into a standalone buffer that survives
+                // until the next iteration (freed by the block above), matching the byte-
+                // pointer semantics the rest of feed_input_buffer relies on.
+                d->bfsc_data = av_malloc(filter_pkt->size + AV_INPUT_BUFFER_PADDING_SIZE);
+                if (!d->bfsc_data) {
+                    av_packet_free(&filter_pkt);
+                    ret = -1;
+                    goto fail;
+                }
+                memcpy(d->bfsc_data, filter_pkt->data, filter_pkt->size);
+                memset(d->bfsc_data + filter_pkt->size, 0, AV_INPUT_BUFFER_PADDING_SIZE);
+                d->pkt_temp.data = d->bfsc_data;
+                d->pkt_temp.size = filter_pkt->size;
+                d->bfsc_ret      = filter_pkt->size;
+            } else {
+                d->bfsc_ret = 0;
+            }
+            av_packet_free(&filter_pkt);
         }
 
-        if (d->pkt_temp.size == d->pkt.size + opaque->avctx->extradata_size) {
-            d->pkt_temp.data += opaque->avctx->extradata_size;
-            d->pkt_temp.size  = d->pkt.size;
-        }
+        // NOTE: the old av_bitstream_filter_filter appended extradata in-place and this code
+        // stripped it back off; the av_bsf h264/hevc_mp4toannexb filters emit clean annex-b
+        // (inserting SPS/PPS in-band as needed) so no manual stripping is required.
 
         AMCTRACE("bsfc->filter(%d): %p[%d] -> %p[%d]", d->bfsc_ret, d->pkt.data, (int)d->pkt.size, d->pkt_temp.data, (int)d->pkt_temp.size);
 #else
@@ -1429,8 +1494,7 @@ static void func_destroy(IJKFF_Pipenode *node)
     av_freep(&opaque->orig_extradata);
 
     if (opaque->bsfc) {
-        av_bitstream_filter_close(opaque->bsfc);
-        opaque->bsfc = NULL;
+        av_bsf_free(&opaque->bsfc);
     }
 #endif
 
@@ -1499,7 +1563,8 @@ static int drain_output_buffer2(JNIEnv *env, IJKFF_Pipenode *node, int64_t timeU
                 }
             }
         }
-        ret = ffp_queue_picture(ffp, frame, pts, duration, av_frame_get_pkt_pos(frame), is->viddec.pkt_serial);
+        // av_frame_get_pkt_pos / frame->pkt_pos removed in FFmpeg 7.0; feeds stats only
+        ret = ffp_queue_picture(ffp, frame, pts, duration, -1, is->viddec.pkt_serial);
         if (ret) {
             if (frame->opaque)
                 SDL_VoutAndroid_releaseBufferProxyP(opaque->weak_vout, (SDL_AMediaCodecBufferProxy **)&frame->opaque, false);
@@ -1641,7 +1706,8 @@ static int func_run_sync(IJKFF_Pipenode *node)
                     }
                 }
             }
-            ret = ffp_queue_picture(ffp, frame, pts, duration, av_frame_get_pkt_pos(frame), is->viddec.pkt_serial);
+            // av_frame_get_pkt_pos / frame->pkt_pos removed in FFmpeg 7.0; feeds stats only
+            ret = ffp_queue_picture(ffp, frame, pts, duration, -1, is->viddec.pkt_serial);
             if (ret) {
                 if (frame->opaque)
                     SDL_VoutAndroid_releaseBufferProxyP(opaque->weak_vout, (SDL_AMediaCodecBufferProxy **)&frame->opaque, false);

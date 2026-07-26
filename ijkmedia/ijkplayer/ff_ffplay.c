@@ -51,6 +51,7 @@
 #include "libavutil/dict.h"
 #include "libavutil/parseutils.h"
 #include "libavutil/samplefmt.h"
+#include "libavutil/channel_layout.h"
 #include "libavutil/avassert.h"
 #include "libavutil/time.h"
 #include "libavutil/attributes.h"
@@ -132,6 +133,31 @@ static AVPacket flush_pkt;
 #define IJKVERSION_GET_MINOR(x)     ((x >>  8) & 0xFF)
 #define IJKVERSION_GET_MICRO(x)     ((x      ) & 0xFF)
 
+/* FFmpeg 7.x helpers: bridge the old uint64 channel-layout bitmask API used
+ * throughout this file to the new AVChannelLayout API. Kept unguarded because
+ * audio_open() (outside CONFIG_AVFILTER) also needs them. */
+static int64_t ffp_default_channel_layout_mask(int nb_channels)
+{
+    AVChannelLayout ch = { 0 };
+    int64_t mask;
+    av_channel_layout_default(&ch, nb_channels);
+    mask = (ch.order == AV_CHANNEL_ORDER_NATIVE) ? (int64_t) ch.u.mask : 0;
+    av_channel_layout_uninit(&ch);
+    return mask;
+}
+
+static int ffp_channel_layout_mask_nb_channels(int64_t channel_layout)
+{
+    AVChannelLayout ch = { 0 };
+    int nb;
+    if (!channel_layout)
+        return 0;
+    av_channel_layout_from_mask(&ch, (uint64_t) channel_layout);
+    nb = ch.nb_channels;
+    av_channel_layout_uninit(&ch);
+    return nb;
+}
+
 #if CONFIG_AVFILTER
 static inline
 int cmp_audio_fmts(enum AVSampleFormat fmt1, int64_t channel_count1,
@@ -147,7 +173,7 @@ int cmp_audio_fmts(enum AVSampleFormat fmt1, int64_t channel_count1,
 static inline
 int64_t get_valid_channel_layout(int64_t channel_layout, int channels)
 {
-    if (channel_layout && av_get_channel_layout_nb_channels(channel_layout) == channels)
+    if (channel_layout && ffp_channel_layout_mask_nb_channels(channel_layout) == channels)
         return channel_layout;
     else
         return 0;
@@ -539,7 +565,16 @@ static int convert_image(FFPlayer *ffp, AVFrame *src_frame, int64_t src_frame_pt
         goto fail2;
     }
 
-    ret = avcodec_encode_video2(img_info->frame_img_codec_ctx, &avpkt, dst_frame, &got_packet);
+    got_packet = 0;
+    ret = avcodec_send_frame(img_info->frame_img_codec_ctx, dst_frame);
+    if (ret >= 0) {
+        ret = avcodec_receive_packet(img_info->frame_img_codec_ctx, &avpkt);
+        if (ret >= 0) {
+            got_packet = 1;
+        } else if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
+            ret = 0;
+        }
+    }
 
     if (ret >= 0 && got_packet > 0) {
         strcpy(file_path, img_info->img_path);
@@ -607,7 +642,7 @@ static int decoder_decode_frame(FFPlayer *ffp, Decoder *d, AVFrame *frame, AVSub
                         if (ret >= 0) {
                             AVRational tb = (AVRational){1, frame->sample_rate};
                             if (frame->pts != AV_NOPTS_VALUE)
-                                frame->pts = av_rescale_q(frame->pts, av_codec_get_pkt_timebase(d->avctx), tb);
+                                frame->pts = av_rescale_q(frame->pts, d->avctx->pkt_timebase, tb);
                             else if (d->next_pts != AV_NOPTS_VALUE)
                                 frame->pts = av_rescale_q(d->next_pts, d->next_pts_tb, tb);
                             if (frame->pts != AV_NOPTS_VALUE) {
@@ -1488,8 +1523,8 @@ display:
                    aqsize / 1024,
                    vqsize / 1024,
                    sqsize,
-                   is->video_st ? is->viddec.avctx->pts_correction_num_faulty_dts : 0,
-                   is->video_st ? is->viddec.avctx->pts_correction_num_faulty_pts : 0);
+                   (int64_t) 0,
+                   (int64_t) 0);
             fflush(stdout);
             last_time = cur_time;
         }
@@ -2128,11 +2163,13 @@ static int audio_thread(void *arg)
                 }
 
 #if CONFIG_AVFILTER
-                dec_channel_layout = get_valid_channel_layout(frame->channel_layout, frame->channels);
+                dec_channel_layout = get_valid_channel_layout(
+                    (frame->ch_layout.order == AV_CHANNEL_ORDER_NATIVE) ? (int64_t) frame->ch_layout.u.mask : 0,
+                    frame->ch_layout.nb_channels);
 
                 reconfigure =
                     cmp_audio_fmts(is->audio_filter_src.fmt, is->audio_filter_src.channels,
-                                   frame->format, frame->channels)    ||
+                                   frame->format, frame->ch_layout.nb_channels)    ||
                     is->audio_filter_src.channel_layout != dec_channel_layout ||
                     is->audio_filter_src.freq           != frame->sample_rate ||
                     is->auddec.pkt_serial               != last_serial        ||
@@ -2142,15 +2179,20 @@ static int audio_thread(void *arg)
                     SDL_LockMutex(ffp->af_mutex);
                     ffp->af_changed = 0;
                     char buf1[1024], buf2[1024];
-                    av_get_channel_layout_string(buf1, sizeof(buf1), -1, is->audio_filter_src.channel_layout);
-                    av_get_channel_layout_string(buf2, sizeof(buf2), -1, dec_channel_layout);
+                    AVChannelLayout buf_layout = { 0 };
+                    av_channel_layout_from_mask(&buf_layout, (uint64_t) is->audio_filter_src.channel_layout);
+                    av_channel_layout_describe(&buf_layout, buf1, sizeof(buf1));
+                    av_channel_layout_uninit(&buf_layout);
+                    av_channel_layout_from_mask(&buf_layout, (uint64_t) dec_channel_layout);
+                    av_channel_layout_describe(&buf_layout, buf2, sizeof(buf2));
+                    av_channel_layout_uninit(&buf_layout);
                     av_log(NULL, AV_LOG_DEBUG,
                            "Audio frame changed from rate:%d ch:%d fmt:%s layout:%s serial:%d to rate:%d ch:%d fmt:%s layout:%s serial:%d\n",
                            is->audio_filter_src.freq, is->audio_filter_src.channels, av_get_sample_fmt_name(is->audio_filter_src.fmt), buf1, last_serial,
-                           frame->sample_rate, frame->channels, av_get_sample_fmt_name(frame->format), buf2, is->auddec.pkt_serial);
+                           frame->sample_rate, frame->ch_layout.nb_channels, av_get_sample_fmt_name(frame->format), buf2, is->auddec.pkt_serial);
 
                     is->audio_filter_src.fmt            = frame->format;
-                    is->audio_filter_src.channels       = frame->channels;
+                    is->audio_filter_src.channels       = frame->ch_layout.nb_channels;
                     is->audio_filter_src.channel_layout = dec_channel_layout;
                     is->audio_filter_src.freq           = frame->sample_rate;
                     last_serial                         = is->auddec.pkt_serial;
@@ -2534,13 +2576,18 @@ reload:
         frame_queue_next(&is->sampq);
     } while (af->serial != is->audioq.serial);
 
-    data_size = av_samples_get_buffer_size(NULL, af->frame->channels,
+    data_size = av_samples_get_buffer_size(NULL, af->frame->ch_layout.nb_channels,
                                            af->frame->nb_samples,
                                            af->frame->format, 1);
 
-    dec_channel_layout =
-        (af->frame->channel_layout && af->frame->channels == av_get_channel_layout_nb_channels(af->frame->channel_layout)) ?
-        af->frame->channel_layout : av_get_default_channel_layout(af->frame->channels);
+    if (af->frame->ch_layout.order == AV_CHANNEL_ORDER_NATIVE && af->frame->ch_layout.u.mask) {
+        dec_channel_layout = af->frame->ch_layout.u.mask;
+    } else {
+        AVChannelLayout ch_default;
+        av_channel_layout_default(&ch_default, af->frame->ch_layout.nb_channels);
+        dec_channel_layout = (ch_default.order == AV_CHANNEL_ORDER_NATIVE) ? ch_default.u.mask : 0;
+        av_channel_layout_uninit(&ch_default);
+    }
     wanted_nb_samples = synchronize_audio(is, af->frame->nb_samples);
 
     if (af->frame->format        != is->audio_src.fmt            ||
@@ -2548,20 +2595,28 @@ reload:
         af->frame->sample_rate   != is->audio_src.freq           ||
         (wanted_nb_samples       != af->frame->nb_samples && !is->swr_ctx)) {
         AVDictionary *swr_opts = NULL;
+        AVChannelLayout swr_out_ch_layout = { 0 };
+        AVChannelLayout swr_in_ch_layout = { 0 };
+        int swr_ret;
         swr_free(&is->swr_ctx);
-        is->swr_ctx = swr_alloc_set_opts(NULL,
-                                         is->audio_tgt.channel_layout, is->audio_tgt.fmt, is->audio_tgt.freq,
-                                         dec_channel_layout,           af->frame->format, af->frame->sample_rate,
-                                         0, NULL);
-        if (!is->swr_ctx) {
+        av_channel_layout_from_mask(&swr_out_ch_layout, is->audio_tgt.channel_layout);
+        av_channel_layout_from_mask(&swr_in_ch_layout, dec_channel_layout);
+        swr_ret = swr_alloc_set_opts2(&is->swr_ctx,
+                                      &swr_out_ch_layout, is->audio_tgt.fmt, is->audio_tgt.freq,
+                                      &swr_in_ch_layout,  af->frame->format, af->frame->sample_rate,
+                                      0, NULL);
+        av_channel_layout_uninit(&swr_out_ch_layout);
+        av_channel_layout_uninit(&swr_in_ch_layout);
+        if (swr_ret < 0 || !is->swr_ctx) {
             av_log(NULL, AV_LOG_ERROR,
                    "Cannot create sample rate converter for conversion of %d Hz %s %d channels to %d Hz %s %d channels!\n",
-                    af->frame->sample_rate, av_get_sample_fmt_name(af->frame->format), af->frame->channels,
+                    af->frame->sample_rate, av_get_sample_fmt_name(af->frame->format), af->frame->ch_layout.nb_channels,
                     is->audio_tgt.freq, av_get_sample_fmt_name(is->audio_tgt.fmt), is->audio_tgt.channels);
+            swr_free(&is->swr_ctx);
             return -1;
         }
         av_dict_copy(&swr_opts, ffp->swr_opts, 0);
-        if (af->frame->channel_layout == AV_CH_LAYOUT_5POINT1_BACK)
+        if (dec_channel_layout == AV_CH_LAYOUT_5POINT1_BACK)
             av_opt_set_double(is->swr_ctx, "center_mix_level", ffp->preset_5_1_center_mix_level, 0);
         av_opt_set_dict(is->swr_ctx, &swr_opts);
         av_dict_free(&swr_opts);
@@ -2569,13 +2624,13 @@ reload:
         if (swr_init(is->swr_ctx) < 0) {
             av_log(NULL, AV_LOG_ERROR,
                    "Cannot create sample rate converter for conversion of %d Hz %s %d channels to %d Hz %s %d channels!\n",
-                    af->frame->sample_rate, av_get_sample_fmt_name(af->frame->format), af->frame->channels,
+                    af->frame->sample_rate, av_get_sample_fmt_name(af->frame->format), af->frame->ch_layout.nb_channels,
                     is->audio_tgt.freq, av_get_sample_fmt_name(is->audio_tgt.fmt), is->audio_tgt.channels);
             swr_free(&is->swr_ctx);
             return -1;
         }
         is->audio_src.channel_layout = dec_channel_layout;
-        is->audio_src.channels       = af->frame->channels;
+        is->audio_src.channels       = af->frame->ch_layout.nb_channels;
         is->audio_src.freq = af->frame->sample_rate;
         is->audio_src.fmt = af->frame->format;
     }
@@ -2782,13 +2837,13 @@ static int audio_open(FFPlayer *opaque, int64_t wanted_channel_layout, int wante
     env = SDL_getenv("SDL_AUDIO_CHANNELS");
     if (env) {
         wanted_nb_channels = atoi(env);
-        wanted_channel_layout = av_get_default_channel_layout(wanted_nb_channels);
+        wanted_channel_layout = ffp_default_channel_layout_mask(wanted_nb_channels);
     }
-    if (!wanted_channel_layout || wanted_nb_channels != av_get_channel_layout_nb_channels(wanted_channel_layout)) {
-        wanted_channel_layout = av_get_default_channel_layout(wanted_nb_channels);
+    if (!wanted_channel_layout || wanted_nb_channels != ffp_channel_layout_mask_nb_channels(wanted_channel_layout)) {
+        wanted_channel_layout = ffp_default_channel_layout_mask(wanted_nb_channels);
         wanted_channel_layout &= ~AV_CH_LAYOUT_STEREO_DOWNMIX;
     }
-    wanted_nb_channels = av_get_channel_layout_nb_channels(wanted_channel_layout);
+    wanted_nb_channels = ffp_channel_layout_mask_nb_channels(wanted_channel_layout);
     wanted_spec.channels = wanted_nb_channels;
     wanted_spec.freq = wanted_sample_rate;
     if (wanted_spec.freq <= 0 || wanted_spec.channels <= 0) {
@@ -2818,7 +2873,7 @@ static int audio_open(FFPlayer *opaque, int64_t wanted_channel_layout, int wante
                 return -1;
             }
         }
-        wanted_channel_layout = av_get_default_channel_layout(wanted_spec.channels);
+        wanted_channel_layout = ffp_default_channel_layout_mask(wanted_spec.channels);
     }
     if (spec.format != AUDIO_S16SYS) {
         av_log(NULL, AV_LOG_ERROR,
@@ -2826,7 +2881,7 @@ static int audio_open(FFPlayer *opaque, int64_t wanted_channel_layout, int wante
         return -1;
     }
     if (spec.channels != wanted_spec.channels) {
-        wanted_channel_layout = av_get_default_channel_layout(spec.channels);
+        wanted_channel_layout = ffp_default_channel_layout_mask(spec.channels);
         if (!wanted_channel_layout) {
             av_log(NULL, AV_LOG_ERROR,
                    "SDL advised channel count %d is not supported!\n", spec.channels);
@@ -2873,7 +2928,7 @@ static int stream_component_open(FFPlayer *ffp, int stream_index)
     ret = avcodec_parameters_to_context(avctx, ic->streams[stream_index]->codecpar);
     if (ret < 0)
         goto fail;
-    av_codec_set_pkt_timebase(avctx, ic->streams[stream_index]->time_base);
+    avctx->pkt_timebase = ic->streams[stream_index]->time_base;
 
     codec = avcodec_find_decoder(avctx->codec_id);
 
@@ -2895,12 +2950,12 @@ static int stream_component_open(FFPlayer *ffp, int stream_index)
     }
 
     avctx->codec_id = codec->id;
-    if(stream_lowres > av_codec_get_max_lowres(codec)){
+    if(stream_lowres > codec->max_lowres){
         av_log(avctx, AV_LOG_WARNING, "The maximum value for lowres supported by the decoder is %d\n",
-                av_codec_get_max_lowres(codec));
-        stream_lowres = av_codec_get_max_lowres(codec);
+                codec->max_lowres);
+        stream_lowres = codec->max_lowres;
     }
-    av_codec_set_lowres(avctx, stream_lowres);
+    avctx->lowres = stream_lowres;
 
 #if FF_API_EMU_EDGE
     if(stream_lowres) avctx->flags |= CODEC_FLAG_EMU_EDGE;
@@ -2939,8 +2994,10 @@ static int stream_component_open(FFPlayer *ffp, int stream_index)
             AVFilterContext *sink;
 
             is->audio_filter_src.freq           = avctx->sample_rate;
-            is->audio_filter_src.channels       = avctx->channels;
-            is->audio_filter_src.channel_layout = get_valid_channel_layout(avctx->channel_layout, avctx->channels);
+            is->audio_filter_src.channels       = avctx->ch_layout.nb_channels;
+            is->audio_filter_src.channel_layout = get_valid_channel_layout(
+                (avctx->ch_layout.order == AV_CHANNEL_ORDER_NATIVE) ? (int64_t) avctx->ch_layout.u.mask : 0,
+                avctx->ch_layout.nb_channels);
             is->audio_filter_src.fmt            = avctx->sample_fmt;
             SDL_LockMutex(ffp->af_mutex);
             if ((ret = configure_audio_filters(ffp, ffp->afilters, 0)) < 0) {
@@ -2951,13 +3008,18 @@ static int stream_component_open(FFPlayer *ffp, int stream_index)
             SDL_UnlockMutex(ffp->af_mutex);
             sink = is->out_audio_filter;
             sample_rate    = av_buffersink_get_sample_rate(sink);
-            nb_channels    = av_buffersink_get_channels(sink);
-            channel_layout = av_buffersink_get_channel_layout(sink);
+            {
+                AVChannelLayout sink_layout = { 0 };
+                av_buffersink_get_ch_layout(sink, &sink_layout);
+                nb_channels    = sink_layout.nb_channels;
+                channel_layout = (sink_layout.order == AV_CHANNEL_ORDER_NATIVE) ? (int64_t) sink_layout.u.mask : 0;
+                av_channel_layout_uninit(&sink_layout);
+            }
         }
 #else
         sample_rate    = avctx->sample_rate;
-        nb_channels    = avctx->channels;
-        channel_layout = avctx->channel_layout;
+        nb_channels    = avctx->ch_layout.nb_channels;
+        channel_layout = (avctx->ch_layout.order == AV_CHANNEL_ORDER_NATIVE) ? (int64_t) avctx->ch_layout.u.mask : 0;
 #endif
 
         /* prepare audio output */
@@ -2980,7 +3042,9 @@ static int stream_component_open(FFPlayer *ffp, int stream_index)
         is->audio_st = ic->streams[stream_index];
 
         decoder_init(&is->auddec, avctx, &is->audioq, is->continue_read_thread);
-        if ((is->ic->iformat->flags & (AVFMT_NOBINSEARCH | AVFMT_NOGENSEARCH | AVFMT_NO_BYTE_SEEK)) && !is->ic->iformat->read_seek) {
+        /* FFmpeg 7: AVInputFormat.read_seek is no longer public (moved to the
+         * internal FFInputFormat); gate on the seek-capability flags only. */
+        if ((is->ic->iformat->flags & (AVFMT_NOBINSEARCH | AVFMT_NOGENSEARCH | AVFMT_NO_BYTE_SEEK))) {
             is->auddec.start_pts = is->audio_st->start_time;
             is->auddec.start_pts_tb = is->audio_st->time_base;
         }
@@ -3096,8 +3160,8 @@ static int is_realtime(AVFormatContext *s)
     )
         return 1;
 
-    if(s->pb && (   !strncmp(s->filename, "rtp:", 4)
-                 || !strncmp(s->filename, "udp:", 4)
+    if(s->pb && s->url && (   !strncmp(s->url, "rtp:", 4)
+                 || !strncmp(s->url, "udp:", 4)
                 )
     )
         return 1;
@@ -3428,7 +3492,7 @@ static int read_thread(void *arg)
             ret = avformat_seek_file(is->ic, -1, seek_min, seek_target, seek_max, is->seek_flags);
             if (ret < 0) {
                 av_log(NULL, AV_LOG_ERROR,
-                       "%s: error while seeking\n", is->ic->filename);
+                       "%s: error while seeking\n", is->ic->url ? is->ic->url : "");
             } else {
                 if (is->audio_stream >= 0) {
                     packet_queue_flush(&is->audioq);
@@ -3844,26 +3908,9 @@ static int video_refresh_thread(void *arg)
     return 0;
 }
 
-static int lockmgr(void **mtx, enum AVLockOp op)
-{
-    switch (op) {
-    case AV_LOCK_CREATE:
-        *mtx = SDL_CreateMutex();
-        if (!*mtx) {
-            av_log(NULL, AV_LOG_FATAL, "SDL_CreateMutex(): %s\n", SDL_GetError());
-            return 1;
-        }
-        return 0;
-    case AV_LOCK_OBTAIN:
-        return !!SDL_LockMutex(*mtx);
-    case AV_LOCK_RELEASE:
-        return !!SDL_UnlockMutex(*mtx);
-    case AV_LOCK_DESTROY:
-        SDL_DestroyMutex(*mtx);
-        return 0;
-    }
-    return 1;
-}
+/* FFmpeg 5.0 removed the lock manager (av_lockmgr_register / AVLockOp) — the
+ * libraries are internally thread-safe now, so the SDL-mutex lockmgr callback is
+ * no longer needed. */
 
 // FFP_MERGE: main
 
@@ -3941,21 +3988,13 @@ void ffp_global_init()
         return;
 
     ALOGD("ijkmediaplayer version : %s", ijkmp_version());
-    /* register all codecs, demux and protocols */
-    avcodec_register_all();
-#if CONFIG_AVDEVICE
-    avdevice_register_all();
-#endif
-#if CONFIG_AVFILTER
-    avfilter_register_all();
-#endif
-    av_register_all();
-
+    /* FFmpeg 5.0+ removed av_register_all / avcodec_register_all /
+     * avfilter_register_all (registration is automatic) and the lock manager
+     * (libraries are thread-safe). */
     ijkav_register_all();
 
     avformat_network_init();
 
-    av_lockmgr_register(lockmgr);
     av_log_set_callback(ffp_log_callback_brief);
 
     av_init_packet(&flush_pkt);
@@ -3968,8 +4007,6 @@ void ffp_global_uninit()
 {
     if (!g_ffmpeg_global_inited)
         return;
-
-    av_lockmgr_register(NULL);
 
     // FFP_MERGE: uninit_opts
 
@@ -4030,7 +4067,7 @@ static void *ffp_context_child_next(void *obj, void *prev)
     return NULL;
 }
 
-static const AVClass *ffp_context_child_class_next(const AVClass *prev)
+static const AVClass *ffp_context_child_class_iterate(void **iter)
 {
     return NULL;
 }
@@ -4041,7 +4078,7 @@ const AVClass ffp_context_class = {
     .option           = ffp_context_options,
     .version          = LIBAVUTIL_VERSION_INT,
     .child_next       = ffp_context_child_next,
-    .child_class_next = ffp_context_child_class_next,
+    .child_class_iterate = ffp_context_child_class_iterate,
 };
 
 static const char *ijk_version_info()

@@ -55,7 +55,11 @@ set(BUILD_SOURCES
     pipeline/ffpipenode_ffplay_vdec.h
 
     ijkavformat/allformats.c
-    ijkavformat/ijklivehook.c
+    # ijklivehook.c: custom demuxer using AVInputFormat read_* callbacks that
+    # moved to the internal FFInputFormat in FFmpeg 7. It is no longer runtime-
+    # registered (see allformats.c), so it is excluded from the build. Restore
+    # by porting to FFInputFormat + build-time demuxer_list registration.
+    # ijkavformat/ijklivehook.c
     ijkavformat/ijkmediadatasource.c
     ijkavformat/ijkio.c
     ijkavformat/ijkiomanager.c
