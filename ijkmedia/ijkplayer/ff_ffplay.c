@@ -1998,14 +1998,23 @@ static int configure_audio_filters(FFPlayer *ffp, const char *afilters, int forc
         goto end;
 
     if (force_output_format) {
-        channel_layouts[0] = is->audio_tgt.channel_layout;
-        channels       [0] = is->audio_tgt.channels;
+        /* FFmpeg 7: abuffersink replaced the int64 "channel_layouts" list and
+         * the "channel_counts" list with a single '|'-separated "ch_layouts"
+         * string. Build it from the target layout (mask if known, else the
+         * default layout for the target channel count). */
+        AVChannelLayout tgt_layout;
+        char ch_layouts_str[64];
+        if (is->audio_tgt.channel_layout)
+            av_channel_layout_from_mask(&tgt_layout, is->audio_tgt.channel_layout);
+        else
+            av_channel_layout_default(&tgt_layout, is->audio_tgt.channels);
+        av_channel_layout_describe(&tgt_layout, ch_layouts_str, sizeof(ch_layouts_str));
+        av_channel_layout_uninit(&tgt_layout);
+
         sample_rates   [0] = is->audio_tgt.freq;
         if ((ret = av_opt_set_int(filt_asink, "all_channel_counts", 0, AV_OPT_SEARCH_CHILDREN)) < 0)
             goto end;
-        if ((ret = av_opt_set_int_list(filt_asink, "channel_layouts", channel_layouts,  -1, AV_OPT_SEARCH_CHILDREN)) < 0)
-            goto end;
-        if ((ret = av_opt_set_int_list(filt_asink, "channel_counts" , channels       ,  -1, AV_OPT_SEARCH_CHILDREN)) < 0)
+        if ((ret = av_opt_set(filt_asink, "ch_layouts", ch_layouts_str, AV_OPT_SEARCH_CHILDREN)) < 0)
             goto end;
         if ((ret = av_opt_set_int_list(filt_asink, "sample_rates"   , sample_rates   ,  -1, AV_OPT_SEARCH_CHILDREN)) < 0)
             goto end;
